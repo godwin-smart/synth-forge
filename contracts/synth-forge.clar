@@ -206,3 +206,96 @@
     )
   )
 )
+
+;; AUTOMATED LIQUIDATION SYSTEM
+
+(define-public (liquidate-vault
+    (vault-owner principal)
+    (max-debt-to-clear uint)
+  )
+  (let (
+      (current-price (unwrap! (get-btc-price) ERR-PRICE-ORACLE-FAILED))
+      (target-vault (unwrap! (map-get? user-vaults vault-owner) ERR-VAULT-NOT-FOUND))
+      (collateral-value (/ (* (get collateral-amount target-vault) current-price) PRECISION))
+      (debt-value (get debt-amount target-vault))
+      (current-ratio (if (> debt-value u0)
+        (/ (* collateral-value u100) debt-value)
+        u0
+      ))
+      (liquidation-id (+ (var-get liquidation-counter) u1))
+      (debt-to-clear (if (> max-debt-to-clear debt-value)
+        debt-value
+        max-debt-to-clear
+      ))
+      (collateral-to-seize (+ (/ (* debt-to-clear PRECISION) current-price)
+        (/ (* debt-to-clear PRECISION LIQUIDATION-PENALTY) (* current-price u100))
+      ))
+    )
+    (begin
+      ;; Verify liquidation eligibility
+      (asserts! (< current-ratio MIN-COLLATERAL-RATIO)
+        ERR-LIQUIDATION-NOT-REQUIRED
+      )
+      (asserts! (>= (ft-get-balance vault-btc tx-sender) debt-to-clear)
+        ERR-INSUFFICIENT-BALANCE
+      )
+
+      ;; Execute liquidation process
+      (try! (ft-burn? vault-btc debt-to-clear tx-sender))
+
+      ;; Update target vault state
+      (map-set user-vaults vault-owner {
+        collateral-amount: (- (get collateral-amount target-vault) collateral-to-seize),
+        debt-amount: (- debt-value debt-to-clear),
+        last-update: stacks-block-height,
+        stability-fee-accrued: (get stability-fee-accrued target-vault),
+      })
+
+      ;; Record liquidation event for transparency
+      (map-set liquidation-events liquidation-id {
+        vault-owner: vault-owner,
+        liquidator: tx-sender,
+        collateral-seized: collateral-to-seize,
+        debt-cleared: debt-to-clear,
+        timestamp: stacks-block-height,
+      })
+
+      ;; Update global state variables
+      (var-set liquidation-counter liquidation-id)
+      (var-set total-collateral-locked
+        (- (var-get total-collateral-locked) collateral-to-seize)
+      )
+
+      (ok {
+        debt-cleared: debt-to-clear,
+        collateral-seized: collateral-to-seize,
+        liquidation-penalty: (/ (* debt-to-clear LIQUIDATION-PENALTY) u100),
+      })
+    )
+  )
+)
+
+;; GOVERNANCE & ADMINISTRATIVE FUNCTIONS
+
+(define-public (update-collateral-ratio (new-ratio uint))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-UNAUTHORIZED)
+    (asserts!
+      (and
+        (>= new-ratio MIN-COLLATERAL-RATIO)
+        (<= new-ratio MAX-COLLATERAL-RATIO)
+      )
+      ERR-COLLATERAL-RATIO-INVALID
+    )
+    (var-set global-collateral-ratio new-ratio)
+    (ok new-ratio)
+  )
+)
+
+(define-public (emergency-shutdown-protocol)
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-UNAUTHORIZED)
+    (var-set emergency-shutdown true)
+    (ok true)
+  )
+)
