@@ -299,3 +299,81 @@
     (ok true)
   )
 )
+
+(define-public (resume-protocol)
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-UNAUTHORIZED)
+    (var-set emergency-shutdown false)
+    (ok true)
+  )
+)
+
+;; VIEW FUNCTIONS & ANALYTICS DASHBOARD
+
+(define-read-only (get-vault-info (vault-owner principal))
+  (let (
+      (vault-data (map-get? user-vaults vault-owner))
+      (current-price (unwrap! (get-btc-price) ERR-PRICE-ORACLE-FAILED))
+    )
+    (match vault-data
+      vault (ok {
+        collateral-amount: (get collateral-amount vault),
+        debt-amount: (get debt-amount vault),
+        collateral-value: (/ (* (get collateral-amount vault) current-price) PRECISION),
+        collateralization-ratio: (if (> (get debt-amount vault) u0)
+          (/
+            (* (/ (* (get collateral-amount vault) current-price) PRECISION) u100)
+            (get debt-amount vault)
+          )
+          u0
+        ),
+        last-update: (get last-update vault),
+      })
+      ERR-VAULT-NOT-FOUND
+    )
+  )
+)
+
+(define-read-only (get-protocol-stats)
+  {
+    total-collateral: (var-get total-collateral-locked),
+    total-synthetic-supply: (ft-get-supply vault-btc),
+    global-collateral-ratio: (var-get global-collateral-ratio),
+    protocol-fees: (var-get protocol-fee-accumulated),
+    emergency-status: (var-get emergency-shutdown),
+    total-liquidations: (var-get liquidation-counter),
+  }
+)
+
+(define-read-only (calculate-max-mintable (collateral-amount uint))
+  (let ((current-price (unwrap! (get-btc-price) ERR-PRICE-ORACLE-FAILED)))
+    (ok (/ (* (/ (* collateral-amount current-price) PRECISION) u100)
+      (var-get global-collateral-ratio)
+    ))
+  )
+)
+
+(define-read-only (get-liquidation-event (event-id uint))
+  (map-get? liquidation-events event-id)
+)
+
+(define-read-only (is-vault-liquidatable (vault-owner principal))
+  (let (
+      (vault-data (map-get? user-vaults vault-owner))
+      (current-price (unwrap! (get-btc-price) false))
+    )
+    (match vault-data
+      vault (let (
+          (collateral-value (/ (* (get collateral-amount vault) current-price) PRECISION))
+          (debt-value (get debt-amount vault))
+          (current-ratio (if (> debt-value u0)
+            (/ (* collateral-value u100) debt-value)
+            u0
+          ))
+        )
+        (< current-ratio MIN-COLLATERAL-RATIO)
+      )
+      false
+    )
+  )
+)
